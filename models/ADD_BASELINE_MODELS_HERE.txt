@@ -1,0 +1,5 @@
+Copy the 12 baseline classifier files into this folder. Expected format:
+FRM_ViT_baseline.joblib, FRM_CLIP_baseline.joblib, FRM_DINOv2_baseline.joblib
+BLR_ViT_baseline.joblib, BLR_CLIP_baseline.joblib, BLR_DINOv2_baseline.joblib
+ROT_ViT_baseline.joblib, ROT_CLIP_baseline.joblib, ROT_DINOv2_baseline.joblib
+UNRECOGNIZABLE_ViT_baseline.joblib, UNRECOGNIZABLE_CLIP_baseline.joblib, UNRECOGNIZABLE_DINOv2_baseline.joblib
