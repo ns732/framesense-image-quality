@@ -462,26 +462,125 @@ if "vizwiz_results" in st.session_state:
     chart_data = chart_data.reindex([TASK_INFO[t]["label"] for t in TASK_ORDER])
     st.bar_chart(chart_data, y_label="P(issue)")
 
-    detected = results[results["Predicted result"] == "Issue detected"]
-    st.subheader("Interpretation")
-    if detected.empty:
-        st.info("None of the selected encoders flagged an issue at the 0.50 threshold for this image.")
-    else:
-        for task in TASK_ORDER:
-            selected_rows = detected[detected["Task"] == task]
-            if not selected_rows.empty:
-                models_text = ", ".join(
-                    f"{row.Encoder} ({row['P(issue)']:.1%})"
-                    for _, row in selected_rows.iterrows()
-                )
-                st.write(f"**{TASK_INFO[task]['label']}:** flagged by {models_text}.")
-
-    st.warning(
-        "Research limitation: these are model scores from binary classifiers, not guaranteed calibrated confidence. "
-        "A low score does not prove an image is clear, and a high score does not prove an issue exists. "
-        "The outputs should not be used as the sole basis for accessibility or safety decisions."
+    
+    st.subheader("What do the results mean?")
+    st.caption(
+        "Plain-language explanations based on the selected encoders. "
+        "These are estimates, not confirmed image-quality judgements."
     )
 
+    guidance = {
+        "FRM": (
+            "Poor framing",
+            "Check whether the main subject is cut off or difficult to locate. "
+            "Try centring the subject and including the whole object."
+        ),
+        "BLR": (
+            "Possible blur",
+            "Check whether the subject and important details look sharp. "
+            "Try holding the phone steady, improving the lighting, "
+            "or moving closer without excessive digital zoom."
+        ),
+        "ROT": (
+            "Possible rotation",
+            "Check whether the subject appears tilted or sideways. "
+            "If it does, straighten the phone and take another photo."
+        ),
+        "UNRECOGNIZABLE": (
+            "Possible recognition difficulty",
+            "Check whether the subject is visible and its important details "
+            "can be seen. Try better lighting, reducing obstructions, "
+            "or framing the subject more clearly."
+        ),
+    }
+
+    for task in TASK_ORDER:
+        task_rows = results[
+            results["Task"].astype(str) == task
+        ].copy()
+
+        if task_rows.empty:
+            continue
+
+        task_rows["P(issue)"] = task_rows["P(issue)"].astype(float)
+        n_models = len(task_rows)
+        n_flagged = int(
+            (task_rows["Predicted result"] == "Issue detected").sum()
+        )
+
+        probabilities = task_rows["P(issue)"].to_numpy()
+        near_threshold = bool(
+            np.any((probabilities >= 0.40) & (probabilities <= 0.60))
+        )
+
+        task_label, advice = guidance[task]
+
+        if n_models == 1:
+            if n_flagged == 1:
+                status = "Possible issue flagged"
+                summary = (
+                    "The selected encoder flagged this issue. "
+                    "Check the image before deciding whether to retake it."
+                )
+            else:
+                status = "No issue flagged by this model"
+                summary = (
+                    "The selected encoder did not cross the decision threshold. "
+                    "This does not guarantee that the image is clear."
+                )
+        elif n_flagged == n_models:
+            status = "All selected models flagged this issue"
+            summary = (
+                "The selected encoders agree that this issue may be present, "
+                "but agreement does not guarantee correctness."
+            )
+        elif n_flagged > n_models / 2:
+            status = "Most selected models flagged this issue"
+            summary = (
+                f"{n_flagged} of {n_models} selected encoders flagged this issue. "
+                "Consider checking the image for the problem described below."
+            )
+        elif n_flagged == 0:
+            status = "No selected model flagged this issue"
+            summary = (
+                "None of the selected encoders crossed the threshold. "
+                "The issue may still be present."
+            )
+        else:
+            status = "The models disagree"
+            summary = (
+                f"{n_flagged} of {n_models} encoders flagged this issue. "
+                "Treat the result cautiously because the encoders do not agree."
+            )
+
+        with st.container(border=True):
+            st.markdown(f"### {task_label}")
+            st.markdown(f"**{status}**")
+            st.write(summary)
+
+            if near_threshold:
+                st.info(
+                    "At least one score is close to the 50% decision threshold. "
+                    "Small score differences can change that model's label, "
+                    "so interpret this result cautiously."
+                )
+
+            st.markdown("**What to check**")
+            st.write(advice)
+
+            score_columns = st.columns(n_models)
+            for col, (_, row) in zip(score_columns, task_rows.iterrows()):
+                with col:
+                    st.metric(
+                        label=str(row["Encoder"]),
+                        value=f'{row["P(issue)"]:.1%}',
+                        help="Estimated issue score; not guaranteed to be calibrated.",
+                    )
+
+            st.caption(
+                "Scores are model outputs, not guaranteed calibrated "
+                "probabilities. Suggested actions are general guidance."
+            )
     csv = results.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download these predictions as CSV",
