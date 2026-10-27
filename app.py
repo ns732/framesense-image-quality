@@ -18,7 +18,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 #   ViT:   ViTForImageClassification.vit(...).last_hidden_state[:, 0, :]
 #   CLIP:  CLIPModel.visual_projection(vision_model(...).pooler_output)
 #   DINOv2: AutoModel(...).last_hidden_state[:, 0, :]
-# Baseline classifiers are compared at a common probability threshold of 0.50.
+# Selected full-data classifiers use task-specific thresholds saved during training.
 # -----------------------------------------------------------------------------
 
 APP_DIR = Path(__file__).resolve().parent
@@ -51,7 +51,24 @@ TASK_INFO = {
 }
 MODEL_ORDER = ["ViT", "CLIP", "DINOv2"]
 TASK_ORDER = ["FRM", "BLR", "ROT", "UNRECOGNIZABLE"]
-THRESHOLD = 0.50
+
+# Best selected full-data model for each task.
+TASK_MODELS = {
+    "FRM": "CLIP",
+    "BLR": "CLIP",
+    "ROT": "DINOv2",
+    "UNRECOGNIZABLE": "CLIP",
+}
+TASK_THRESHOLDS = {
+    "FRM": 0.42,
+    "BLR": 0.53,
+    "ROT": 0.76,
+    "UNRECOGNIZABLE": 0.86,
+}
+TASK_MODEL_FILES = {
+    task: f"{task}_{encoder}_full.joblib"
+    for task, encoder in TASK_MODELS.items()
+}
 
 st.set_page_config(
     page_title="FrameSense | Image Quality Reliability",
@@ -207,9 +224,9 @@ st.markdown(
       <h1>Frame<span>Sense</span></h1>
       <p>Image quality and encoder reliability. Compare ViT, CLIP and DINOv2 on the same photo to explore four quality signals that matter for assistive computer vision.</p>
       <div class="hero-tags">
-        <span class="hero-tag">ViT · CLIP · DINOv2</span>
+        <span class="hero-tag">CLIP · DINOv2</span>
         <span class="hero-tag">4 quality tasks</span>
-        <span class="hero-tag">Shared threshold · 0.50</span>
+        <span class="hero-tag">Task-specific thresholds</span>
       </div>
     </div>
     """,
@@ -218,13 +235,12 @@ st.markdown(
 
 
 st.markdown(
-    '<div class="section-eyebrow">Live model comparison</div>',
+    '<div class="section-eyebrow">Image-quality assessment</div>',
     unsafe_allow_html=True,
 )
 st.write(
-    "Upload a photo to compare the models side by side. Each encoder is frozen and "
-    "paired with its saved logistic-regression classifiers; all baseline predictions "
-    "use the same 0.50 threshold."
+    "Upload a photo to assess four image-quality issues. FrameSense uses the selected "
+    "full-data classifier for each task and applies its task-specific decision threshold."
 )
 
 with st.sidebar:
@@ -234,8 +250,13 @@ with st.sidebar:
     )
     st.header("About this demo")
     st.write("**Study pipeline**")
-    st.write("Frozen visual encoder → saved logistic-regression classifier")
-    st.metric("Decision threshold", "0.50")
+    st.write("Frozen visual encoder → saved classifier pipeline")
+    st.markdown("**Selected models**")
+    st.write("CLIP: framing, blur and unrecognizability")
+    st.write("DINOv2: rotation")
+    st.markdown("**Decision thresholds**")
+    for task in TASK_ORDER:
+        st.write(f"· {TASK_INFO[task]['label']}: {TASK_THRESHOLDS[task]:.2f}")
     st.markdown("**Tasks in this study**")
     for task in TASK_ORDER:
         st.write(f"· {TASK_INFO[task]['label']}")
@@ -244,17 +265,26 @@ with st.sidebar:
     st.caption("Research demonstration only — not a safety-critical image-quality checker.")
 
 
-def classifier_path(task: str, encoder: str) -> Path:
-    return MODELS_DIR / f"{task}_{encoder}_baseline.joblib"
+def classifier_path(task: str, encoder: str | None = None) -> Path:
+    """Return the selected full-data model file for a task."""
+    return MODELS_DIR / TASK_MODEL_FILES[task]
 
 
-def load_classifier(task: str, encoder: str) -> Any:
-    path = classifier_path(task, encoder)
+def load_classifier(task: str, encoder: str | None = None) -> tuple[Any, float]:
+    """Load the saved pipeline and its training-selected threshold."""
+    path = classifier_path(task)
     if not path.is_file():
         raise FileNotFoundError(
-            f"Missing classifier: {path.name}. Put all 12 baseline .joblib files in the app's models/ folder."
+            f"Missing selected model: {path.name}. Put the four *_full.joblib files in the app's models/ folder."
         )
-    return joblib.load(path)
+
+    saved_data = joblib.load(path)
+    if not isinstance(saved_data, dict) or "pipeline" not in saved_data:
+        raise ValueError(f"Unexpected model-file format in {path.name}; expected a dictionary containing 'pipeline'.")
+
+    pipeline = saved_data["pipeline"]
+    threshold = float(saved_data.get("threshold", TASK_THRESHOLDS[task]))
+    return pipeline, threshold
 
 
 def encoder_source(encoder: str) -> str:
@@ -317,72 +347,83 @@ def embedding_for_image(image: Image.Image, encoder: str) -> np.ndarray:
     return array.reshape(1, expected_dim)
 
 
-def score_image(image: Image.Image, selected_encoders: list[str]) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
+def score_image(image: Image.Image) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
+    """Score each task with its selected encoder and saved classifier pipeline."""
     rows: list[dict[str, Any]] = []
-    probability_grid: dict[str, np.ndarray] = {}
+    embedding_cache: dict[str, np.ndarray] = {}
 
-    progress = st.progress(0, text="Preparing comparison…")
-    total = len(selected_encoders)
+    progress = st.progress(0, text="Preparing image assessment…")
+    total = len(TASK_ORDER)
 
-    for index, encoder in enumerate(selected_encoders):
-        progress.progress(index / max(total, 1), text=f"Extracting {encoder} features…")
-        vector = embedding_for_image(image, encoder)
-        scores = []
+    for index, task in enumerate(TASK_ORDER):
+        encoder = TASK_MODELS[task]
+        progress.progress(index / max(total, 1), text=f"Checking {TASK_INFO[task]['label'].lower()} with {encoder}…")
 
-        for task in TASK_ORDER:
-            classifier = load_classifier(task, encoder)
-            model_dim = getattr(classifier, "n_features_in_", None)
-            if model_dim is not None and vector.shape[1] != int(model_dim):
-                raise ValueError(
-                    f"Feature dimension mismatch for {encoder}/{task}: "
-                    f"encoder returned {vector.shape[1]} features, classifier expects {model_dim}. "
-                    "Check that the app uses the same pretrained checkpoint and feature extraction as training."
-                )
+        if encoder not in embedding_cache:
+            embedding_cache[encoder] = embedding_for_image(image, encoder)
+        vector = embedding_cache[encoder]
 
-            probabilities = classifier.predict_proba(vector)[0]
-            classes = list(classifier.classes_)
-            if 1 not in classes:
-                raise ValueError(f"Classifier {task}/{encoder} does not have positive class 1.")
-            positive_probability = float(probabilities[classes.index(1)])
-            predicted = int(positive_probability >= THRESHOLD)
-            scores.append(positive_probability)
+        classifier, saved_threshold = load_classifier(task, encoder)
+        model_dim = getattr(classifier, "n_features_in_", None)
+        if model_dim is not None and vector.shape[1] != int(model_dim):
+            raise ValueError(
+                f"Feature dimension mismatch for {encoder}/{task}: encoder returned {vector.shape[1]} features, "
+                f"but the classifier expects {model_dim}. Check the checkpoint and feature extraction used during training."
+            )
 
-            rows.append({
-                "Encoder": encoder,
-                "Task": task,
-                "Image-quality issue": TASK_INFO[task]["label"],
-                "Predicted result": "Issue detected" if predicted else "No issue detected",
-                "P(issue)": positive_probability,
-                "Threshold": THRESHOLD,
-            })
+        probabilities = classifier.predict_proba(vector)[0]
+        classes = list(classifier.classes_)
+        if 1 not in classes:
+            raise ValueError(f"Classifier for {task}/{encoder} does not have positive class 1.")
+        positive_probability = float(probabilities[classes.index(1)])
+        # Prefer the threshold stored with the selected model file.
+        threshold = saved_threshold
+        predicted = int(positive_probability >= threshold)
 
-        probability_grid[encoder] = np.asarray(scores, dtype=float)
-        progress.progress((index + 1) / total, text=f"Finished {encoder}")
-
-        del vector
-        gc.collect()
+        rows.append({
+            "Encoder": encoder,
+            "Task": task,
+            "Image-quality issue": TASK_INFO[task]["label"],
+            "Predicted result": "Issue detected" if predicted else "No issue detected",
+            "P(issue)": positive_probability,
+            "Threshold": threshold,
+        })
+        progress.progress((index + 1) / total, text=f"Finished {TASK_INFO[task]['label'].lower()}")
 
     progress.empty()
     result_df = pd.DataFrame(rows)
     result_df["Task"] = pd.Categorical(result_df["Task"], TASK_ORDER, ordered=True)
     result_df["Encoder"] = pd.Categorical(result_df["Encoder"], MODEL_ORDER, ordered=True)
     result_df = result_df.sort_values(["Task", "Encoder"]).reset_index(drop=True)
+
+    # Keep the existing summary-card/chart structure while showing only the tasks
+    # each selected encoder actually handles. NaN means that encoder was not used for that task.
+    probability_grid: dict[str, np.ndarray] = {}
+    for encoder in sorted(set(TASK_MODELS.values()), key=MODEL_ORDER.index):
+        encoder_rows = result_df[result_df["Encoder"] == encoder].set_index("Task")
+        probability_grid[encoder] = np.array([
+            float(encoder_rows.loc[task, "P(issue)"]) if task in encoder_rows.index else np.nan
+            for task in TASK_ORDER
+        ], dtype=float)
+
+    embedding_cache.clear()
+    gc.collect()
     return result_df, probability_grid
 
 
-expected_files = [classifier_path(task, encoder) for task in TASK_ORDER for encoder in MODEL_ORDER]
+expected_files = [classifier_path(task) for task in TASK_ORDER]
 missing_files = [p.name for p in expected_files if not p.is_file()]
 if missing_files:
     st.warning(
-        "The saved classifier files have not been added yet. Add all 12 baseline files to `models/` before running inference. "
-        "Missing files: " + ", ".join(missing_files)
+        "Some selected full-data model files are missing from `models/`. "
+        "Add the four *_full.joblib files before running inference. Missing files: "
+        + ", ".join(missing_files)
     )
 
-selected_encoders = st.multiselect(
-    "Encoders to compare",
-    options=MODEL_ORDER,
-    default=MODEL_ORDER,
-    help="Choose one or more encoders. The app loads one backbone at a time to reduce memory use.",
+
+st.info(
+    "Selected models: CLIP for poor framing, blur and unrecognizability; DINOv2 for rotation. "
+    "Each task uses its own saved decision threshold."
 )
 
 uploaded = st.file_uploader(
@@ -406,16 +447,16 @@ if uploaded is not None:
 
         with st.form("inference_form"):
             run_button = st.form_submit_button(
-                "Compare selected encoders",
+                "Assess image quality",
                 type="primary",
                 use_container_width=True,
-                disabled=(not selected_encoders or bool(missing_files)),
+                disabled=bool(missing_files),
             )
 
         if run_button:
             try:
                 with st.spinner("Running image-quality models. The first run can take a few minutes while weights download."):
-                    results, score_grid = score_image(image, selected_encoders)
+                    results, score_grid = score_image(image)
                 st.session_state["vizwiz_results"] = results
                 st.session_state["vizwiz_scores"] = score_grid
                 st.session_state["vizwiz_image_name"] = uploaded.name
@@ -434,18 +475,18 @@ if "vizwiz_results" in st.session_state:
     st.header("Prediction results")
     st.caption(
         f"Image: {st.session_state.get('vizwiz_image_name', 'uploaded image')} · "
-        f"positive class threshold = {THRESHOLD:.2f}"
+        "task-specific decision thresholds are shown in the results table"
     )
 
-    cols = st.columns(len(scores))
-    for col, encoder in zip(cols, [m for m in MODEL_ORDER if m in scores]):
-        frame = results[results["Encoder"] == encoder]
-        issue_count = int((frame["Predicted result"] == "Issue detected").sum())
+    cols = st.columns(len(TASK_ORDER))
+    for col, task in zip(cols, TASK_ORDER):
+        frame = results[results["Task"].astype(str) == task]
+        issue_flagged = not frame.empty and frame.iloc[0]["Predicted result"] == "Issue detected"
         with col:
             with st.container(border=True):
-                st.markdown(f"<div class='section-eyebrow'>{encoder} encoder</div>", unsafe_allow_html=True)
-                st.metric("Issues flagged", f"{issue_count} / {len(frame)}")
-                st.caption(ENCODER_INFO[encoder]["description"])
+                st.markdown(f"<div class='section-eyebrow'>{TASK_INFO[task]['label']}</div>", unsafe_allow_html=True)
+                st.metric("Assessment", "Possible issue" if issue_flagged else "No issue flagged")
+                st.caption(f"{TASK_MODELS[task]} · threshold {TASK_THRESHOLDS[task]:.2f}")
 
     st.subheader("Side-by-side task results")
     display = results.copy()
@@ -458,9 +499,9 @@ if "vizwiz_results" in st.session_state:
     )
 
     st.subheader("Positive-class model scores")
-    chart_data = results.pivot(index="Image-quality issue", columns="Encoder", values="P(issue)")
+    chart_data = results.set_index("Image-quality issue")[["P(issue)"]]
     chart_data = chart_data.reindex([TASK_INFO[t]["label"] for t in TASK_ORDER])
-    st.bar_chart(chart_data, y_label="P(issue)")
+    st.bar_chart(chart_data, y_label="Model score")
 
     
     st.subheader("What do the results mean?")
@@ -509,9 +550,8 @@ if "vizwiz_results" in st.session_state:
         )
 
         probabilities = task_rows["P(issue)"].to_numpy()
-        near_threshold = bool(
-            np.any((probabilities >= 0.40) & (probabilities <= 0.60))
-        )
+        task_threshold = float(task_rows["Threshold"].iloc[0])
+        near_threshold = bool(np.any(np.abs(probabilities - task_threshold) <= 0.05))
 
         task_label, advice = guidance[task]
 
@@ -560,7 +600,7 @@ if "vizwiz_results" in st.session_state:
 
             if near_threshold:
                 st.info(
-                    "At least one score is close to the 50% decision threshold. "
+                    f"The model score is close to this task's {task_threshold:.2f} decision threshold. "
                     "Small score differences can change that model's label, "
                     "so interpret this result cautiously."
                 )
@@ -572,7 +612,7 @@ if "vizwiz_results" in st.session_state:
             for col, (_, row) in zip(score_columns, task_rows.iterrows()):
                 with col:
                     st.metric(
-                        label=str(row["Encoder"]),
+                        label=f'{row["Encoder"]} score',
                         value=f'{row["P(issue)"]:.1%}',
                         help="Estimated issue score; not guaranteed to be calibrated.",
                     )
