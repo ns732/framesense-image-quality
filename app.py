@@ -18,7 +18,8 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 #   ViT:   ViTForImageClassification.vit(...).last_hidden_state[:, 0, :]
 #   CLIP:  CLIPModel.visual_projection(vision_model(...).pooler_output)
 #   DINOv2: AutoModel(...).last_hidden_state[:, 0, :]
-# Selected full-data classifiers use task-specific thresholds saved during training.
+# Selected full-data classifiers use task-specific thresholds; the UNRECOGNIZABLE threshold
+# is intentionally set to 0.80 for a recall-oriented demo operating point.
 # -----------------------------------------------------------------------------
 
 APP_DIR = Path(__file__).resolve().parent
@@ -63,7 +64,7 @@ TASK_THRESHOLDS = {
     "FRM": 0.42,
     "BLR": 0.53,
     "ROT": 0.76,
-    "UNRECOGNIZABLE": 0.86,
+    "UNRECOGNIZABLE": 0.80,
 }
 TASK_MODEL_FILES = {
     task: f"{task}_{encoder}_full.joblib"
@@ -271,7 +272,7 @@ def classifier_path(task: str, encoder: str | None = None) -> Path:
 
 
 def load_classifier(task: str, encoder: str | None = None) -> tuple[Any, float]:
-    """Load the saved pipeline and its training-selected threshold."""
+    """Load the saved pipeline and use the app-configured task threshold."""
     path = classifier_path(task)
     if not path.is_file():
         raise FileNotFoundError(
@@ -283,7 +284,10 @@ def load_classifier(task: str, encoder: str | None = None) -> tuple[Any, float]:
         raise ValueError(f"Unexpected model-file format in {path.name}; expected a dictionary containing 'pipeline'.")
 
     pipeline = saved_data["pipeline"]
-    threshold = float(saved_data.get("threshold", TASK_THRESHOLDS[task]))
+    # Use app-configured thresholds so deliberate operating-point changes are
+    # reflected consistently in predictions and the interface. The saved model
+    # metadata remains unchanged.
+    threshold = float(TASK_THRESHOLDS[task])
     return pipeline, threshold
 
 
@@ -363,7 +367,7 @@ def score_image(image: Image.Image) -> tuple[pd.DataFrame, dict[str, np.ndarray]
             embedding_cache[encoder] = embedding_for_image(image, encoder)
         vector = embedding_cache[encoder]
 
-        classifier, saved_threshold = load_classifier(task, encoder)
+        classifier, configured_threshold = load_classifier(task, encoder)
         model_dim = getattr(classifier, "n_features_in_", None)
         if model_dim is not None and vector.shape[1] != int(model_dim):
             raise ValueError(
@@ -376,8 +380,8 @@ def score_image(image: Image.Image) -> tuple[pd.DataFrame, dict[str, np.ndarray]
         if 1 not in classes:
             raise ValueError(f"Classifier for {task}/{encoder} does not have positive class 1.")
         positive_probability = float(probabilities[classes.index(1)])
-        # Prefer the threshold stored with the selected model file.
-        threshold = saved_threshold
+        # Apply the task-specific threshold configured for this app release.
+        threshold = configured_threshold
         predicted = int(positive_probability >= threshold)
 
         rows.append({
