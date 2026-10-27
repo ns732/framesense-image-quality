@@ -1,4 +1,4 @@
-# FrameSense — Image Quality Assessment for Accessibility
+# FrameSense - Image Quality Assessment for Accessibility
 
 FrameSense is a Streamlit research demo that assesses four image-quality issues using saved classifiers built on pretrained image encoders. It is based on the VizWiz-QualityIssues dataset, which contains real-world photos captured by people who are blind or have low vision.
 
@@ -22,9 +22,9 @@ The current app uses these selected model artefacts:
 | Poor framing (`FRM`) | CLIP | 0.42 |
 | Blur (`BLR`) | CLIP | 0.53 |
 | Rotation (`ROT`) | DINOv2 | 0.76 |
-| Unrecognisable content (`UNRECOGNIZABLE`) | CLIP | 0.86 |
+| Unrecognisable content (`UNRECOGNIZABLE`) | CLIP | 0.80 |
 
-A positive prediction is made when the classifier's positive-class score meets the task's threshold. The score should not be interpreted as a guaranteed or calibrated probability that the image has the issue.
+A positive prediction is made when the classifier's positive-class score meets the task's configured threshold. The unrecognizability threshold was changed from 0.86 to 0.80 as a recall-oriented operating-point choice after an exploratory comparison on validation predictions. In that comparison, recall increased while precision and F1-score decreased. This is a trade-off, not an overall performance improvement. The score should not be interpreted as a guaranteed or calibrated probability that the image has the issue. The model artefact itself was not retrained or modified.
 
 ## Model files
 
